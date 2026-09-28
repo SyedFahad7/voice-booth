@@ -23,7 +23,7 @@ import { slug, stamp } from "../lib/names.mjs";
 const VIDEO_TYPE = { ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska" };
 // Big files go from the browser straight to storage through signed links; the function only ever
 // sees small JSON bodies (Vercel refuses request bodies over 4.5 MB).
-const MAX_VIDEO = 2 << 30;
+const MAX_VIDEO = 2 * 1024 ** 3;
 const TMP = path.join(os.tmpdir(), "voice-booth");
 
 const eleven = process.env.ELEVENLABS_API_KEY ? createEleven(process.env.ELEVENLABS_API_KEY) : null;
