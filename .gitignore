@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.vercel/
+
+# Made while you use the booth
+cache/
+stems/
+exports/
+uploads/
+work/
+music/

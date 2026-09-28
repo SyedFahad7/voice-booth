@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice booth · Graphify</title>
+    <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/GeistMono-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <img src="/graphify-logo-ink.svg" alt="Graphify" height="22" />
+        <span class="super">Voice booth</span>
+      </div>
+      <label class="picker">
+        <span class="eyebrow">Video</span>
+        <select id="project" aria-label="Video"></select>
+      </label>
+      <button id="open-video" class="ghost" type="button">Open a video…</button>
+      <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.webm,.mkv,.m4v" hidden />
+      <div id="status" class="status mono"></div>
+    </header>
+
+    <main class="layout">
+      <section id="stage" class="stage">
+        <div id="player" class="player marks">
+          <video id="video" playsinline preload="auto"></video>
+          <div id="empty" class="empty">
+            <p>Drop a finished video here, or pick one above. Drop an MP3 to use it as music.</p>
+          </div>
+          <div id="drop" class="drop">Drop to open</div>
+        </div>
+
+        <div id="script" class="script-card">
+          <div class="script-head">
+            <span class="eyebrow">Script</span>
+            <span id="script-hint" class="hint">Follows the voice. Click a word to jump there.</span>
+            <button id="lex-open" class="icon" type="button" title="Words the voices say wrong, and how to say them">Say it like</button>
+            <label class="check small"><input id="check-words" type="checkbox" /> Check every word</label>
+          </div>
+          <div id="script-body" class="script-body"></div>
+        </div>
+
+        <div class="transport">
+          <button id="play" class="round" type="button" aria-label="Play or pause">▶</button>
+          <span id="time" class="mono time">0:00.0 / 0:00.0</span>
+          <div id="timeline" class="timeline">
+            <div class="lane voice-lane" title="Top: the original voice. Bottom: the take you're hearing.">
+              <span class="lane-label">Voice</span>
+              <div id="lanes" class="spans"></div>
+            </div>
+            <div class="lane music-lane">
+              <span class="lane-label">Music</span>
+              <div id="clip-area" class="clip-area"></div>
+            </div>
+            <div id="playhead" class="playhead"></div>
+            <div id="drag-tip" class="drag-tip mono" hidden></div>
+          </div>
+        </div>
+
+        <div class="takes-row">
+          <span class="eyebrow">Listening to</span>
+          <div id="takes" class="takes"></div>
+        </div>
+        <p id="pace" class="hint pace"></p>
+        <div id="warnings"></div>
+      </section>
+
+      <aside class="side">
+        <section class="panel">
+          <div class="tabs" role="tablist">
+            <button type="button" role="tab" data-tab="mine" class="on">My voices</button>
+            <button type="button" role="tab" data-tab="library">Voice Library</button>
+          </div>
+          <input id="voice-search" type="search" placeholder="Search voices" autocomplete="off" spellcheck="false" />
+          <div id="voices" class="voices"></div>
+        </section>
+
+        <section class="panel">
+          <div class="chosen">
+            <span class="eyebrow">Voice</span>
+            <strong id="chosen-voice">Pick a voice</strong>
+          </div>
+          <label class="field">
+            <span>Model</span>
+            <select id="model"></select>
+          </label>
+          <p id="model-hint" class="hint"></p>
+          <label class="field">
+            <span>Speed</span>
+            <input id="speed" type="range" min="0.7" max="1.2" step="0.01" />
+            <output id="speed-out" class="mono"></output>
+          </label>
+          <p id="speed-hint" class="hint"></p>
+          <label class="field">
+            <span>Sync</span>
+            <select id="mode">
+              <option value="natural">Natural</option>
+              <option value="phrase">Phrase sync</option>
+              <option value="tight">Tight</option>
+            </select>
+          </label>
+          <p id="mode-hint" class="hint"></p>
+          <details class="advanced">
+            <summary>Delivery</summary>
+            <label class="check"><input id="presets" type="checkbox" /> Use the project's delivery presets</label>
+            <label class="field">
+              <span>Stability</span>
+              <input id="stability" type="range" min="0" max="1" step="0.01" />
+              <output class="mono" data-for="stability"></output>
+            </label>
+            <label class="field">
+              <span>Similarity</span>
+              <input id="similarity" type="range" min="0" max="1" step="0.01" />
+              <output class="mono" data-for="similarity"></output>
+            </label>
+            <label class="field">
+              <span>Style</span>
+              <input id="style" type="range" min="0" max="1" step="0.01" />
+              <output class="mono" data-for="style"></output>
+            </label>
+          </details>
+          <div id="markup-hint" class="markup-hint" hidden></div>
+          <button id="generate" class="primary" type="button">Generate voiceover</button>
+          <p id="gen-note" class="hint"></p>
+        </section>
+
+        <section class="panel">
+          <span class="eyebrow">Mix</span>
+          <label class="field">
+            <span>Voice</span>
+            <input id="voice-db" type="range" min="-12" max="12" step="0.5" value="0" />
+            <output id="voice-db-out" class="mono"></output>
+          </label>
+          <label class="field">
+            <span>Bed</span>
+            <select id="bed-source"></select>
+          </label>
+          <label class="field">
+            <span>Bed level</span>
+            <input id="bed-db" type="range" min="-24" max="6" step="0.5" value="0" />
+            <output id="bed-db-out" class="mono"></output>
+          </label>
+          <div id="bed-status" class="hint"></div>
+
+          <div class="music-box">
+            <div class="music-head">
+              <span class="eyebrow">Music</span>
+              <span class="music-actions">
+                <button id="music-browse" class="icon" type="button">Browse music…</button>
+                <button id="music-add" class="icon" type="button">Add a file…</button>
+              </span>
+              <input id="music-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" hidden />
+            </div>
+            <div id="music-info" class="hint"></div>
+            <label class="field">
+              <span>Volume</span>
+              <input id="music-db" type="range" min="-24" max="12" step="0.5" value="0" />
+              <output id="music-db-out" class="mono"></output>
+            </label>
+            <label class="field">
+              <span>Fade in</span>
+              <input id="music-fi" type="range" min="0" max="8" step="0.1" value="1" />
+              <output id="music-fi-out" class="mono"></output>
+            </label>
+            <label class="field">
+              <span>Fade out</span>
+              <input id="music-fo" type="range" min="0" max="8" step="0.1" value="2" />
+              <output id="music-fo-out" class="mono"></output>
+            </label>
+            <label class="field">
+              <span>Duck</span>
+              <select id="music-duck">
+                <option value="0">Off</option>
+                <option value="4">Light: 4 dB under the voice</option>
+                <option value="8">Normal: 8 dB under the voice</option>
+                <option value="12">Strong: 12 dB under the voice</option>
+              </select>
+            </label>
+          </div>
+
+          <button id="export" class="ghost wide" type="button">Export MP4</button>
+          <div id="export-result" class="hint"></div>
+          <div id="handoff" class="handoff" hidden></div>
+        </section>
+      </aside>
+    </main>
+
+    <dialog id="music-dialog" class="dialog" aria-label="Music library">
+      <div class="dialog-head">
+        <div class="tabs" role="tablist">
+          <button type="button" role="tab" data-mtab="library" class="on">Library</button>
+          <button type="button" role="tab" data-mtab="generate">Make music</button>
+        </div>
+        <span id="music-count" class="hint"></span>
+        <button id="music-close" class="icon" type="button" aria-label="Close">Close</button>
+      </div>
+      <div id="music-library" class="dialog-body">
+        <div id="starter-banner"></div>
+        <div class="lib-filters">
+          <input id="music-search" type="search" placeholder="Search music" autocomplete="off" spellcheck="false" />
+          <select id="music-style" aria-label="Style"></select>
+          <select id="music-length" aria-label="Length">
+            <option value="">Any length</option>
+            <option value="short">Under 45 s</option>
+            <option value="mid">45–90 s</option>
+            <option value="long">Over 90 s</option>
+          </select>
+        </div>
+        <div id="music-list" class="track-list"></div>
+      </div>
+      <div id="music-generate" class="dialog-body" hidden>
+        <div class="gen-top">
+          <div class="gen-fit">
+            <span class="eyebrow">Compose to fit this video</span>
+            <p id="fit-summary" class="hint"></p>
+            <button id="gen-fit" class="primary" type="button">Compose to fit this video</button>
+          </div>
+          <div class="gen-length">
+            <span class="eyebrow">Length for single tracks</span>
+            <div id="gen-length" class="seg"></div>
+          </div>
+        </div>
+        <p class="hint">Pick a style below. "Compose to fit" writes music whose parts change where the video's lines change and resolves on the last frame. "Make a track" writes a stand-alone piece at the chosen length.</p>
+        <div id="style-grid" class="style-grid"></div>
+        <div class="gen-custom">
+          <span class="eyebrow">Or describe it</span>
+          <textarea id="gen-prompt" rows="2" placeholder="e.g. patient felt piano over a soft pulse, hopeful, resolves gently at the end"></textarea>
+          <button id="gen-prompt-go" class="ghost" type="button">Make it</button>
+        </div>
+        <div id="gen-jobs" class="job-list"></div>
+      </div>
+    </dialog>
+
+    <dialog id="lex-dialog" class="dialog lex" aria-label="Pronunciations">
+      <div class="dialog-head">
+        <strong>Say it like</strong>
+        <span id="lex-count" class="hint"></span>
+        <button id="lex-close" class="icon" type="button" aria-label="Close">Close</button>
+      </div>
+      <div class="dialog-body">
+        <p class="hint">Words the voices say wrong in this project. The respelling goes to every voice; a phonetic spelling (IPA) goes to v3 voices instead, since they read it exactly. The script card and the project keep the real word. Lines that use a changed word show "out of date", and ↻ updates them.</p>
+        <div class="lex-row lex-labels"><span>Word</span><span>Say it like</span><span>IPA for v3 voices (optional)</span><span></span></div>
+        <div id="lex-rows" class="lex-rows"></div>
+        <button id="lex-add" class="ghost" type="button">Add a word</button>
+      </div>
+    </dialog>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <audio id="sample" preload="none"></audio>
+  </body>
+</html>
