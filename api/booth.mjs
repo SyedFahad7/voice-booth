@@ -16,16 +16,15 @@ import { createEleven, speechBody } from "../lib/eleven.mjs";
 import { createFfmpeg } from "../lib/ffmpeg.mjs";
 import { hasPassword, signIn, signOut, signedIn } from "../lib/hosted/auth.mjs";
 import * as music from "../lib/hosted/music.mjs";
-import { find, listAll, mediaPath, openFile, randomName, readJson, signedUrl, storageReady, writeFile, writeJson } from "../lib/hosted/r2.mjs";
-import { starterStatus } from "../lib/music-core.mjs";
+import { find, listAll, openFile, randomName, readJson, remove, signedPutUrl, signedUrl, storageReady, writeFile, writeJson } from "../lib/hosted/r2.mjs";
+import { AUDIO_EXT, starterStatus } from "../lib/music-core.mjs";
 import { slug, stamp } from "../lib/names.mjs";
 
 const VIDEO_TYPE = { ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska" };
-// Vercel functions take request bodies up to 100 MB.
-const MAX_UPLOAD = 95 << 20;
+// Big files go from the browser straight to storage through signed links; the function only ever
+// sees small JSON bodies (Vercel refuses request bodies over 4.5 MB).
+const MAX_VIDEO = 2 << 30;
 const TMP = path.join(os.tmpdir(), "voice-booth");
-// Keys the page may read through /media/file.
-const READABLE = /^(tts|music|bundles|extract)\//;
 
 const eleven = process.env.ELEVENLABS_API_KEY ? createEleven(process.env.ELEVENLABS_API_KEY) : null;
 // ffmpeg-static downloads its binary in an install script, which npm only runs when allowed.
@@ -48,13 +47,6 @@ const readBody = async (request) => {
   } catch {
     throw new HttpError(400, "Body is not JSON");
   }
-};
-
-const readUpload = async (request, what) => {
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_UPLOAD) throw new HttpError(413, `The hosted booth takes ${what} up to 95 MB.`);
-  const buf = Buffer.from(await request.arrayBuffer());
-  if (!buf.length) throw new HttpError(400, "The request had no file in it");
-  return buf;
 };
 
 const needEleven = () => {
@@ -114,26 +106,26 @@ const listProjects = async () => {
   ];
 };
 
-// What the page sees: links instead of storage keys. Video plays from a signed link; audio is
-// fetched through /media/file on this origin.
+// What the page sees: signed links instead of storage keys.
 const clientProject = async (p) => {
   const video = { url: await signedUrl(p.video.key), name: p.video.name, width: p.video.width ?? null, height: p.video.height ?? null, duration: p.video.duration ?? null };
   const base = { id: p.id, video, canBuildBed: false, canSaveTake: false, handoff: null, bedJob: null };
   if (p.kind !== "bundle") {
     return { ...base, kind: "upload", title: p.title, group: "Uploaded videos", bed: null, voiceGain: 1, original: null, sections: [], takes: [], warnings: [], script: (await latestScript(p.id))?.sections ?? null };
   }
+  const sign = (key) => (key ? signedUrl(key) : null);
   return {
     ...base,
     kind: "bundle",
     title: p.title,
     group: p.group,
-    bed: p.bed ? { url: mediaPath(p.bed.key), name: p.bed.name, stale: false } : null,
+    bed: p.bed ? { url: await sign(p.bed.key), name: p.bed.name, stale: false } : null,
     canPick: true,
     pickTrack: p.source?.handoff?.script ?? null,
     voiceGain: p.voiceGain ?? 1,
     original: p.original ?? null,
-    sections: p.sections.map((s) => ({ ...s, orig: s.orig ? { url: s.orig.key ? mediaPath(s.orig.key) : null, chars: s.orig.chars, starts: s.orig.starts, ends: s.orig.ends } : null })),
-    takes: (p.takes ?? []).map((t) => ({ ...t, sections: t.sections.map(({ key, ...s }) => ({ ...s, url: mediaPath(key) })) })),
+    sections: await Promise.all(p.sections.map(async (s) => ({ ...s, orig: s.orig ? { url: await sign(s.orig.key), chars: s.orig.chars, starts: s.orig.starts, ends: s.orig.ends } : null }))),
+    takes: await Promise.all((p.takes ?? []).map(async (t) => ({ ...t, sections: await Promise.all(t.sections.map(async ({ key, ...s }) => ({ ...s, url: await sign(key) }))) }))),
     warnings: p.warnings ?? [],
     publishedAt: p.publishedAt,
   };
@@ -160,7 +152,7 @@ const readObject = async (key) => {
 
 /* Speech */
 
-const ttsReply = (m, cached) => ({ key: m.key, audio: mediaPath(m.audioKey), chars: m.chars, starts: m.starts, ends: m.ends, attempt: m.attempt, ms: m.ms, cached });
+const ttsReply = async (m, cached) => ({ key: m.key, audio: await signedUrl(m.audioKey), chars: m.chars, starts: m.starts, ends: m.ends, attempt: m.attempt, ms: m.ms, cached });
 
 // The WAV is what the page plays; the MP3 is ElevenLabs' own file, which a picked take carries
 // back to the video project.
@@ -244,17 +236,29 @@ const routes = [
   ["POST", /^\/api\/projects\/([\w.-]+)\/bed$/, async () => Promise.reject(new HttpError(400, LOCAL_ONLY))],
   [
     "POST",
-    /^\/api\/upload$/,
-    async (request, m, url) => {
-      const name = path.basename(url.searchParams.get("name") ?? "video.mp4");
+    /^\/api\/upload\/sign$/,
+    async (request) => {
+      const b = await readBody(request);
+      const name = path.basename(String(b.name ?? "video.mp4"));
       const ext = path.extname(name).toLowerCase();
       if (!VIDEO_TYPE[ext]) throw new HttpError(400, `Unsupported video type "${ext || name}"`);
-      const buf = await readUpload(request, "videos");
-      const title = path.basename(name, ext);
-      const id = `up-${stamp()}-${slug(title)}-${crypto.randomBytes(3).toString("hex")}`;
-      const video = await writeFile(`uploads/${id}/${randomName(`video${ext}`)}`, buf, VIDEO_TYPE[ext]);
-      await writeJson(`projects/${id}.json`, { id, title, video: { key: video.key, name }, createdAt: new Date().toISOString() });
-      return { id };
+      if (Number(b.size) > MAX_VIDEO) throw new HttpError(413, "The hosted booth takes videos up to 2 GB.");
+      const id = `up-${stamp()}-${slug(path.basename(name, ext))}-${crypto.randomBytes(3).toString("hex")}`;
+      const key = `uploads/${id}/${randomName(`video${ext}`)}`;
+      return { id, key, url: await signedPutUrl(key) };
+    },
+  ],
+  [
+    "POST",
+    /^\/api\/upload\/finish$/,
+    async (request) => {
+      const b = await readBody(request);
+      if (!/^up-[\w.-]+$/.test(b.id ?? "") || !String(b.key ?? "").startsWith(`uploads/${b.id}/`)) throw new HttpError(400, "Bad upload");
+      const video = await find(b.key);
+      if (!video) throw new HttpError(400, "The upload didn't arrive. Try again.");
+      const name = path.basename(String(b.name ?? "video.mp4"));
+      await writeJson(`projects/${b.id}.json`, { id: b.id, title: path.basename(name, path.extname(name)), video: { key: b.key, name, size: video.size }, createdAt: new Date().toISOString() });
+      return { id: b.id };
     },
   ],
   [
@@ -297,9 +301,9 @@ const routes = [
       const body = speechBody(b);
       const key = crypto.createHash("sha256").update(JSON.stringify([b.voiceId, body])).digest("hex").slice(0, 32);
       const hit = await readJson(`tts/${key}.json`);
-      if (hit) return ttsReply(hit, true);
+      if (hit) return await ttsReply(hit, true);
       if (b.cacheOnly) throw new HttpError(404, "Not cached");
-      return ttsReply(await generate(key, b.voiceId, body), false);
+      return await ttsReply(await generate(key, b.voiceId, body), false);
     },
   ],
   [
@@ -369,10 +373,21 @@ const routes = [
     },
   ],
   [
+    // The page hashes the file first, so a track already in the library isn't uploaded again.
     "POST",
-    /^\/api\/music$/,
-    async (request, m, url) => music.saveUpload(path.basename(url.searchParams.get("name") ?? "music.mp3"), await readUpload(request, "audio files")),
+    /^\/api\/music\/sign$/,
+    async (request) => {
+      const b = await readBody(request);
+      const ext = path.extname(path.basename(String(b.name ?? ""))).toLowerCase();
+      if (!AUDIO_EXT.has(ext)) throw new HttpError(400, `Unsupported audio type "${ext || b.name}"`);
+      if (!/^[a-f0-9]{40}$/.test(b.sha1 ?? "")) throw new HttpError(400, "Missing the file's SHA-1");
+      const id = b.sha1.slice(0, 16);
+      const existing = await readJson(`music/${id}.json`);
+      if (existing) return { track: await music.reply(existing) };
+      return { id, ext, url: await signedPutUrl(`music/${id}${ext}`) };
+    },
   ],
+  ["POST", /^\/api\/music\/finish$/, async (request) => music.register(await readBody(request))],
   [
     "GET",
     /^\/api\/music$/,
@@ -401,20 +416,33 @@ const routes = [
   ],
   [
     "POST",
+    /^\/api\/export\/sign$/,
+    async () => {
+      const key = `mixes/${randomName("mix.wav")}`;
+      return { key, url: await signedPutUrl(key) };
+    },
+  ],
+  [
+    // The page uploads its mix first (export/sign), then asks for the MP4.
+    "POST",
     /^\/api\/export$/,
-    async (request, m, url) => {
-      const p = await projectOr404(url.searchParams.get("project"));
-      const mix = await readUpload(request, "mixes");
-      const label = slug(url.searchParams.get("label") ?? "voice");
+    async (request) => {
+      const b = await readBody(request);
+      const p = await projectOr404(b.project);
+      if (!/^mixes\/[\w.-]+\.wav$/.test(b.mixKey ?? "")) throw new HttpError(400, "Upload the mix first");
+      const label = slug(b.label ?? "voice");
       const file = `${slug(p.id)}__${label}__${stamp()}.mp4`;
       const [video, wav, out] = [await localVideo(p), tmpFile("mix.wav"), tmpFile(file)];
       try {
-        fs.writeFileSync(wav, mix);
+        const mix = await openFile(b.mixKey);
+        if (!mix.ok) throw new HttpError(400, "The mix upload didn't arrive. Try again.");
+        await pipeline(Readable.fromWeb(mix.body), fs.createWriteStream(wav));
         await needFfmpeg().mux(video, wav, out);
         const saved = await writeFile(`exports/${randomName(file)}`, fs.readFileSync(out), "video/mp4");
         return { file, url: await signedUrl(saved.key), download: await signedUrl(saved.key, { download: file }), mb: Number((saved.size / 1048576).toFixed(1)) };
       } finally {
         dropTmp(wav, out);
+        remove(b.mixKey).catch(() => {});
       }
     },
   ],
@@ -437,21 +465,10 @@ const routes = [
         await writeFile(key, fs.readFileSync(out), "audio/wav");
         dropTmp(out);
       }
-      return mediaFile(key, request);
+      return new Response(null, { status: 302, headers: { Location: await signedUrl(key), "Cache-Control": "no-store" } });
     },
   ],
-  ["GET", /^\/media\/file\/(.+)$/, async (request, m) => mediaFile(m[1].split("/").map(decodeURIComponent).join("/"), request)],
 ];
-
-// Streams an object from the private bucket, passing Range through so audio can seek.
-const mediaFile = async (key, request) => {
-  if (!READABLE.test(key) || key.includes("..")) throw new HttpError(404, "Not found");
-  const res = await openFile(key, request.headers.get("range"));
-  if (res.status === 404) throw new HttpError(404, "Not found");
-  const headers = { "Cache-Control": "private, max-age=604800, immutable", "Accept-Ranges": "bytes" };
-  for (const h of ["content-type", "content-length", "content-range", "etag"]) if (res.headers.get(h)) headers[h] = res.headers.get(h);
-  return new Response(res.body, { status: res.status, headers });
-};
 
 const OPEN = new Set(["POST /api/login", "POST /api/logout"]);
 

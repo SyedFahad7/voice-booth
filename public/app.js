@@ -1902,11 +1902,17 @@ const exportMix = async () => {
     limit([L, R], SR, -1);
     const wav = encodeWav([L, R], SR);
     const label = `${shortVoice(take.voiceId)}-${shortModel(take.modelId)}-${take.speed.toFixed(2)}-${S.sel.mode}${S.music?.buffer ? "-music" : ""}`;
-    S.exportResult = await api(`/api/export?project=${encodeURIComponent(p.id)}&label=${encodeURIComponent(label)}`, {
-      method: "POST",
-      body: wav,
-      headers: { "Content-Type": "audio/wav" },
-    });
+    if (S.status?.hosted) {
+      const signed = await api("/api/export/sign", { method: "POST" });
+      await putFile(signed.url, new Blob([wav], { type: "audio/wav" }), "Uploading the mix");
+      S.exportResult = await api("/api/export", { method: "POST", json: { project: p.id, label, mixKey: signed.key } });
+    } else {
+      S.exportResult = await api(`/api/export?project=${encodeURIComponent(p.id)}&label=${encodeURIComponent(label)}`, {
+        method: "POST",
+        body: wav,
+        headers: { "Content-Type": "audio/wav" },
+      });
+    }
     toast(`Saved ${S.exportResult.file}`);
   } catch (err) {
     toast(`Export failed: ${err.message}`, "error");
@@ -1985,15 +1991,48 @@ const buildBed = async () => {
   poll();
 };
 
-// Vercel functions take request bodies up to 100 MB.
-const HOSTED_MAX = 95 * 1048576;
+// On the hosted booth big files go from the browser straight to storage through a signed link,
+// because Vercel refuses request bodies over 4.5 MB.
+const putFile = (url, file, label) =>
+  new Promise((resolve, reject) => {
+    const note = h("div", { class: "toast" }, `${label}…`);
+    $("#toasts").append(note);
+    const done = () => {
+      note.classList.add("out");
+      setTimeout(() => note.remove(), 500);
+    };
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    if (file.type) xhr.setRequestHeader("Content-Type", file.type);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) note.textContent = `${label}… ${Math.round((e.loaded / e.total) * 100)}%`;
+    };
+    xhr.onload = () => {
+      done();
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`storage refused the upload (${xhr.status})`));
+    };
+    xhr.onerror = () => {
+      done();
+      reject(new Error("the upload was cut off"));
+    };
+    xhr.send(file);
+  });
+
+const sha1Hex = async (file) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-1", await file.arrayBuffer())), (b) => b.toString(16).padStart(2, "0")).join("");
 
 const uploadVideo = async (file) => {
   if (!file) return;
-  if (S.status?.hosted && file.size > HOSTED_MAX) return toast("The hosted booth opens videos up to 95 MB. For a video project, publish it from the machine that has it (npm run publish).", "error");
-  toast(`Opening ${file.name}…`);
   try {
-    const { id } = await api(`/api/upload?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+    let id;
+    if (S.status?.hosted) {
+      const signed = await api("/api/upload/sign", { method: "POST", json: { name: file.name, size: file.size } });
+      await putFile(signed.url, file, `Uploading ${file.name}`);
+      ({ id } = await api("/api/upload/finish", { method: "POST", json: { id: signed.id, key: signed.key, name: file.name } }));
+    } else {
+      toast(`Opening ${file.name}…`);
+      ({ id } = await api(`/api/upload?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file }));
+    }
     await loadProjects();
     $("#project").value = id;
     await loadProject(id);
@@ -2005,10 +2044,19 @@ const uploadVideo = async (file) => {
 const uploadMusic = async (file) => {
   if (!file) return;
   if (!S.project) return toast("Open a video first, then add music.", "error");
-  if (S.status?.hosted && file.size > HOSTED_MAX) return toast("The hosted booth takes audio files up to 95 MB.", "error");
-  toast(`Adding ${file.name}…`);
   try {
-    const meta = await api(`/api/music?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+    let meta;
+    if (S.status?.hosted) {
+      const signed = await api("/api/music/sign", { method: "POST", json: { name: file.name, sha1: await sha1Hex(file) } });
+      meta = signed.track;
+      if (!meta) {
+        await putFile(signed.url, file, `Adding ${file.name}`);
+        meta = await api("/api/music/finish", { method: "POST", json: { id: signed.id, ext: signed.ext, name: file.name } });
+      }
+    } else {
+      toast(`Adding ${file.name}…`);
+      meta = await api(`/api/music?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+    }
     await loadMusicLib();
     await useMusic(meta);
     toast(`${meta.name} is on the music lane. Drag it to move it, pull its edges to trim.`);
