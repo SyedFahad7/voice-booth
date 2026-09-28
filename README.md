@@ -68,6 +68,33 @@ A voice map, with paths relative to the file:
 `at` is where the section's audio starts on the video. `orig` is the ElevenLabs character timing
 of the take the picture was cut to; without it, sections simply play from `at`.
 
+## Hosted booth
+
+The same booth can run on Vercel behind one shared password, so people without the video project
+can audition voices from a link. A video's timing and bed only exist next to its project, so
+projects travel to the hosted booth as *bundles*, and a take picked there travels back:
+
+```bash
+npm run publish -- list               # projects on this machine that can be published
+npm run publish -- test-impact-main   # upload the render, voice-free bed, original lines + timing
+npm run publish -- music              # copy the local music library up
+npm run picks                         # takes sent back from the hosted booth
+npm run picks -- import <pickId>      # save one into its video project as a new voice track
+```
+
+On the hosted booth, a bundle plays exactly like the local project. "Send this take to the project"
+replaces "Save take to project". Any other video can still be opened directly (up to 95 MB).
+
+Setup: a Vercel project (framework "Other") with these environment variables, and a private
+Cloudflare R2 bucket with an Object Read & Write API token. The publish and picks commands read the
+R2 values from `.env`.
+
+| Variable | What it is |
+| --- | --- |
+| `ELEVENLABS_API_KEY` | Your ElevenLabs key, used only on the server |
+| `BOOTH_PASSWORD` | The shared sign-in password |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | Where videos, takes and music are stored |
+
 ## Commands
 
 | Command | What it does |

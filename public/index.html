@@ -249,6 +249,20 @@
       </div>
     </dialog>
 
+    <div id="signin" class="signin" hidden>
+      <form id="signin-form" class="signin-card">
+        <img src="graphify-logo-ink.svg" alt="Graphify" height="22" />
+        <strong>Voice booth</strong>
+        <p class="hint">This booth is shared with the Graphify team. Sign in with the booth password.</p>
+        <label class="field">
+          <span>Password</span>
+          <input id="signin-password" type="password" autocomplete="current-password" required />
+        </label>
+        <button class="primary" type="submit">Sign in</button>
+        <p id="signin-error" class="hint bad"></p>
+      </form>
+    </div>
+
     <div id="toasts" class="toasts" aria-live="polite"></div>
     <audio id="sample" preload="none"></audio>
   </body>

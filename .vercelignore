@@ -1,0 +1,9 @@
+node_modules
+.env
+.env.*
+cache
+stems
+exports
+uploads
+work
+music

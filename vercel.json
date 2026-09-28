@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/booth?route=/api/:path*" },
+    { "source": "/media/:path*", "destination": "/api/booth?route=/media/:path*" }
+  ],
+  "functions": {
+    "api/booth.mjs": {
+      "maxDuration": 300,
+      "includeFiles": "node_modules/ffmpeg-static/ffmpeg"
+    }
+  }
+}

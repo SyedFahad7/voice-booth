@@ -36,8 +36,32 @@ const api = async (url, { method = "GET", json, body, headers } = {}) => {
   } catch {
     data = { error: text.slice(0, 300) };
   }
+  if (res.status === 401 && data?.signin) showSignin(data.error);
   if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`);
   return data;
+};
+
+// The hosted booth sits behind one password; any call made signed out opens this.
+const showSignin = (message) => {
+  const box = document.querySelector("#signin");
+  if (!box.hidden) return;
+  box.hidden = false;
+  document.querySelector("#signin-error").textContent = /^Sign in/.test(message ?? "") ? "" : message ?? "";
+  setTimeout(() => document.querySelector("#signin-password").focus(), 0);
+};
+
+const signIn = async (e) => {
+  e.preventDefault();
+  const err = document.querySelector("#signin-error");
+  err.textContent = "";
+  const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: document.querySelector("#signin-password").value }) });
+  if (res.ok) return location.reload();
+  err.textContent = (await res.json().catch(() => null))?.error ?? "Couldn't sign in.";
+};
+
+const signOut = async () => {
+  await fetch("/api/logout", { method: "POST" });
+  location.reload();
 };
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1587,13 +1611,13 @@ const loadProject = async (id) => {
   engine.setBooth(false);
   for (const name of ["voice", "bed", "music"]) engine.set(name, null);
   const p = await api(`/api/projects/${encodeURIComponent(id)}`);
-  if (p.kind === "upload") p.sections = store.get(`script.${p.id}`, []).map((s, i) => ({ settings: null, orig: null, delivery: null, seed: 1842 + i, ...s }));
+  if (p.kind === "upload") p.sections = ((S.status?.hosted && p.script) || store.get(`script.${p.id}`, [])).map((s, i) => ({ settings: null, orig: null, delivery: null, seed: 1842 + i, ...s }));
   p.baseSections = p.sections.map((s) => ({ text: s.text }));
   if (p.kind !== "upload") {
     const edits = store.get(`edits.${p.id}`, {});
     for (const s of p.sections) if (edits[s.id]) s.text = edits[s.id];
   }
-  Object.assign(S, { project: p, takes: [], active: "original", bed: null, music: null, musicTrack: null, exportResult: null, handoffResult: null, targetLufs: -18, duration: p.video.duration ?? 0, editing: -1 });
+  Object.assign(S, { project: p, takes: [], active: "original", bed: null, music: null, musicTrack: null, exportResult: null, handoffResult: null, pickResult: null, targetLufs: -18, duration: p.video.duration ?? 0, editing: -1 });
   S.lexicon = store
     .get(`lexicon.${p.id}`, [])
     .map(cleanEntry)
@@ -1891,6 +1915,25 @@ const exportMix = async () => {
   renderExport();
 };
 
+// The project gets timing on the line's own words, not on the pauses or respellings sent.
+const takeLines = (take) =>
+  take.sections.map((s, i) => ({
+    id: S.project.sections[i].id,
+    key: s.key,
+    clean: s.marks?.length || s.lex?.length ? { chars: s.align.chars, starts: s.align.starts, ends: s.align.ends } : undefined,
+  }));
+
+const sendPick = async (track, note) => {
+  const take = activeTake();
+  try {
+    S.pickResult = await api("/api/picks", { method: "POST", json: { project: S.project.id, track, note, voiceId: take.voiceId, modelId: take.modelId, speed: take.speed, sections: takeLines(take) } });
+    toast(`Sent "${S.pickResult.track}" to the project.`);
+  } catch (err) {
+    S.pickResult = { error: err.message };
+  }
+  renderExport();
+};
+
 const saveTakeToProject = async (track) => {
   const take = activeTake();
   const p = S.project;
@@ -1903,12 +1946,7 @@ const saveTakeToProject = async (track) => {
         voiceId: take.voiceId,
         modelId: take.modelId,
         speed: take.speed,
-        // The project gets timing on the line's own words, not on the pauses or respellings sent.
-        sections: take.sections.map((s, i) => ({
-          id: p.sections[i].id,
-          key: s.key,
-          clean: s.marks?.length || s.lex?.length ? { chars: s.align.chars, starts: s.align.starts, ends: s.align.ends } : undefined,
-        })),
+        sections: takeLines(take),
       },
     });
     toast(`Saved as the "${track}" track in ${p.handoff.cwd}.`);
@@ -1947,8 +1985,12 @@ const buildBed = async () => {
   poll();
 };
 
+// Vercel functions take request bodies up to 100 MB.
+const HOSTED_MAX = 95 * 1048576;
+
 const uploadVideo = async (file) => {
   if (!file) return;
+  if (S.status?.hosted && file.size > HOSTED_MAX) return toast("The hosted booth opens videos up to 95 MB. For a video project, publish it from the machine that has it (npm run publish).", "error");
   toast(`Opening ${file.name}…`);
   try {
     const { id } = await api(`/api/upload?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
@@ -1963,6 +2005,7 @@ const uploadVideo = async (file) => {
 const uploadMusic = async (file) => {
   if (!file) return;
   if (!S.project) return toast("Open a video first, then add music.", "error");
+  if (S.status?.hosted && file.size > HOSTED_MAX) return toast("The hosted booth takes audio files up to 95 MB.", "error");
   toast(`Adding ${file.name}…`);
   try {
     const meta = await api(`/api/music?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
@@ -1974,11 +2017,16 @@ const uploadMusic = async (file) => {
   }
 };
 
-const saveScript = () =>
-  store.set(
-    `script.${S.project.id}`,
-    S.project.sections.map(({ id, text, at, pinned, seed }) => ({ id, text, at, pinned, seed })),
-  );
+// The hosted booth also keeps an uploaded video's script with the video, so it follows you.
+let scriptTimer = null;
+const saveScript = () => {
+  const p = S.project;
+  const sections = p.sections.map(({ id, text, at, pinned, seed }) => ({ id, text, at, pinned, seed }));
+  store.set(`script.${p.id}`, sections);
+  if (!S.status?.hosted) return;
+  clearTimeout(scriptTimer);
+  scriptTimer = setTimeout(() => api(`/api/projects/${encodeURIComponent(p.id)}/script`, { method: "PUT", json: { sections } }).catch((err) => toast(`Couldn't save the script: ${err.message}`, "error")), 800);
+};
 
 const applyScript = (text) => {
   const p = S.project;
@@ -2027,9 +2075,13 @@ const renderStatus = () => {
   else if (s.subscription && !s.subscription.error) bits.push(`${Math.max(0, s.subscription.limit - s.subscription.used).toLocaleString()} credits left`);
   else bits.push(`Key from ${s.keySource}`);
   if (!s.ffmpeg) bits.push(h("span", { class: "bad" }, "No ffmpeg, so export is off"));
+  if (s.hosted) bits.push(h("button", { class: "linkish", type: "button", onclick: signOut }, "Sign out"));
   bits.forEach((b, i) => el.append(...(i ? [" · ", b] : [b])));
-  el.title = s.key ? `ElevenLabs key from ${s.keySource}\nffmpeg: ${s.ffmpeg ?? "missing"}` : "Put ELEVENLABS_API_KEY in voice-booth/.env";
+  el.title = s.key ? `ElevenLabs key from ${s.keySource}\nffmpeg: ${s.ffmpeg ?? "missing"}` : keyHint();
 };
+
+const keyHint = () =>
+  S.status?.hosted ? "Add ELEVENLABS_API_KEY to the Vercel project's environment variables and redeploy." : "Put ELEVENLABS_API_KEY in voice-booth/.env and restart.";
 
 const renderProjects = () => {
   const sel = $("#project");
@@ -2075,7 +2127,7 @@ const renderVoices = () => {
   const box = $("#voices");
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === S.tab));
   $("#voice-search").placeholder = S.tab === "mine" ? "Filter your voices" : "Search the Voice Library, then press Enter";
-  if (!S.status?.key) return box.replaceChildren(h("p", { class: "none" }, "Add ELEVENLABS_API_KEY to voice-booth/.env and restart to load voices."));
+  if (!S.status?.key) return box.replaceChildren(h("p", { class: "none" }, `${keyHint()} Then your voices load here.`));
   if (S.tab === "mine") {
     const q = S.query.trim().toLowerCase();
     const list = S.voices.filter((v) => !q || [v.name, v.gender, v.age, v.accent, v.description, v.useCase, v.category].join(" ").toLowerCase().includes(q));
@@ -2160,7 +2212,7 @@ const renderControls = () => {
   );
   $("#generate").disabled = !p?.sections.length || !S.sel.voiceId || !S.status?.key;
   $("#gen-note").textContent = !S.status?.key
-    ? "Add ELEVENLABS_API_KEY to voice-booth/.env to generate."
+    ? keyHint()
     : p?.sections.length
       ? `${p.sections.length} lines · ${chars.toLocaleString()} characters · about ${Math.round(chars * (m?.costFactor ?? 1)).toLocaleString()} credits. A take you've made before loads from cache for free.`
       : p
@@ -2359,10 +2411,37 @@ const renderMix = () => {
   $("#music-duck").value = String(m?.duck ?? 8);
 };
 
+// On the hosted booth a picked take goes back to the video project through `npm run picks`.
+const renderPick = (box, p, take) => {
+  if (!p?.canPick || take?.kind !== "generated") {
+    box.hidden = true;
+    return box.replaceChildren();
+  }
+  box.hidden = false;
+  const complete = take.sections.every((s) => s.status === "ready" && !s.stale);
+  const track = h("input", { type: "text", spellcheck: "false" });
+  track.value = take.track ?? `${p.pickTrack ?? "take"}-${slugify(shortVoice(take.voiceId))}`;
+  track.addEventListener("input", () => (take.track = track.value.trim()));
+  const note = h("input", { type: "text", placeholder: "Why this one? (optional)" });
+  const r = S.pickResult;
+  box.replaceChildren(
+    ...[
+      h("span", { class: "eyebrow" }, "Picked this voice?"),
+      h("p", {}, "Send the exact take you're hearing back to the video project. On the computer with the project, ", h("code", {}, "npm run picks"), " saves it as a voice track, and the video renders once with it."),
+      h("label", { class: "field" }, h("span", {}, "Track"), track),
+      h("label", { class: "field" }, h("span", {}, "Note"), note),
+      h("button", { class: "ghost", type: "button", disabled: !complete, onclick: () => sendPick(track.value.trim(), note.value.trim()) }, "Send this take to the project"),
+      r?.error ? h("p", { class: "hint bad" }, r.error) : null,
+      r?.id ? h("p", { class: "hint" }, "Sent as ", h("code", {}, r.track), ". To bring it in: ", h("code", {}, `npm run picks -- import ${r.id}`)) : null,
+    ].filter(Boolean),
+  );
+};
+
 const renderHandoff = () => {
   const box = $("#handoff");
   const p = S.project;
   const take = activeTake();
+  if (S.status?.hosted) return renderPick(box, p, take);
   if (!p?.handoff || take?.kind !== "generated") {
     box.hidden = true;
     return box.replaceChildren();
@@ -2418,13 +2497,16 @@ const renderExport = () => {
   else box.append(`Copies the video untouched and writes the voice${S.music?.buffer ? ", music" : ""} and bed as its audio.`);
   if (S.exportResult) {
     const r = S.exportResult;
+    const hosted = S.status?.hosted;
     box.append(
-      h("div", {}, "Saved ", h("code", {}, `exports/${r.file}`), ` (${r.mb} MB)`),
+      h("div", {}, hosted ? "Ready: " : "Saved ", h("code", {}, hosted ? r.file : `exports/${r.file}`), ` (${r.mb} MB)`),
       h(
         "div",
         { class: "links" },
         h("button", { type: "button", onclick: () => window.open(r.url, "_blank") }, "Play it"),
-        h("button", { type: "button", onclick: () => api("/api/reveal", { method: "POST", json: { file: r.file } }).catch((e) => toast(e.message, "error")) }, "Show in folder"),
+        hosted
+          ? h("button", { type: "button", onclick: () => (location.href = r.download) }, "Download")
+          : h("button", { type: "button", onclick: () => api("/api/reveal", { method: "POST", json: { file: r.file } }).catch((e) => toast(e.message, "error")) }, "Show in folder"),
       ),
     );
   }
@@ -2645,6 +2727,7 @@ const wire = () => {
       renderVoices();
     }
   });
+  $("#signin-form").addEventListener("submit", signIn);
   $("#lex-open").addEventListener("click", openLexicon);
   $("#lex-add").addEventListener("click", addLexRow);
   $("#lex-close").addEventListener("click", () => lexDialog().close());
